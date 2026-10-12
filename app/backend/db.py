@@ -61,6 +61,17 @@ ALTER TABLE {SCHEMA}.user_keys ENABLE ROW LEVEL SECURITY;
 
 _pool = None
 _lock = threading.Lock()
+# After a failed connect, requests fail at once for this long instead of
+# each waiting for its own attempt: logins never pile up behind a database
+# that is down or misconfigured (a proxy in front answers 502 to those).
+RETRY_AFTER_S = 15.0
+_failed_at = 0.0
+
+
+def placeholder_url() -> bool:
+    """SUPABASE_DB_URL still holds Supabase's [YOUR-PASSWORD] placeholder."""
+    url = config.DATABASE_URL.lower()
+    return "[your-password]" in url or "[password]" in url
 
 
 def enabled() -> bool:
@@ -122,7 +133,7 @@ def status() -> str:
         if _status["value"] and now - _status["t"] < STATUS_CACHE_S:
             return _status["value"]
     url = config.DATABASE_URL
-    if "[your-password]" in url.lower() or "[password]" in url.lower():
+    if placeholder_url():
         value = ("error: SUPABASE_DB_URL still contains the [YOUR-PASSWORD] placeholder - "
                  "put the real database password there (without the brackets)")
     else:
@@ -146,9 +157,15 @@ def status() -> str:
 def pool():
     """The process's connection pool (opened + schema created on first use;
     raises if the database cannot be reached - the next call retries)."""
-    global _pool
+    global _pool, _failed_at
     if _pool is None:
+        if placeholder_url():
+            raise RuntimeError("SUPABASE_DB_URL still contains the [YOUR-PASSWORD] placeholder")
+        if time.monotonic() - _failed_at < RETRY_AFTER_S:
+            raise RuntimeError("database unavailable (the last connect attempt just failed)")
         with _lock:
+            if _pool is None and time.monotonic() - _failed_at < RETRY_AFTER_S:
+                raise RuntimeError("database unavailable (the last connect attempt just failed)")
             if _pool is None:
                 from psycopg_pool import ConnectionPool
                 p = ConnectionPool(
@@ -159,11 +176,12 @@ def pool():
                     check=ConnectionPool.check_connection, max_idle=300,
                     timeout=20, open=False, name="bdc")
                 try:
-                    p.open(wait=True, timeout=30)
+                    p.open(wait=True, timeout=15)
                     with p.connection() as conn:
                         conn.execute(_DDL)
                 except BaseException:
                     p.close()
+                    _failed_at = time.monotonic()
                     raise
                 _pool = p
                 log.info("database connected")
