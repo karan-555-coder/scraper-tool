@@ -1,0 +1,47 @@
+# Render Blueprint: the backend (FastAPI API + its collection worker).
+# One instance by design - jobs live in the worker process the API supervises.
+services:
+  - type: web
+    name: business-data-collector
+    runtime: python
+    plan: free
+    rootDir: app
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m backend.serve --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    # deploy a commit only after the GitHub Actions tests pass on it
+    # (.github/workflows/tests.yml); a failing or missing check never deploys
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.10
+      - key: SERPER_API_KEY
+        sync: false          # entered in the Render dashboard, never committed
+      - key: SUPABASE_DB_URL
+        sync: false          # Supabase Session pooler connection string: turns on
+                             # login / sign-up and keeps users' records + Excel
+                             # files in the database (this disk is wiped)
+      - key: APP_AUTH_TOKEN
+        sync: false          # access code the web page asks for
+      - key: APP_FORCE_HTTPS
+        value: "1"
+      - key: TRUSTED_PROXY_HOPS
+        value: "1"           # Render's proxy appends the caller's address to
+                             # X-Forwarded-For; check /api/health "client_ip"
+                             # shows YOUR public IP after a deploy
+      # Sized for the free plan (0.1 CPU / 512 MB). Remove on a bigger plan.
+      # 3 users collect at the same time; a 4th queues. A lone collection
+      # gets 32 crawl threads, each one that joins it 16.
+      - key: MAX_ACTIVE_JOBS
+        value: "3"
+      - key: GLOBAL_CRAWL_WORKERS
+        value: "48"
+      - key: SCRAPER_CONCURRENCY
+        value: "32"
+      # CPU / memory savers (also the automatic small-host defaults)
+      - key: EXPORT_MIN_INTERVAL
+        value: "60"          # mid-run Excel refresh, seconds
+      - key: STATUS_PUBLISH_INTERVAL
+        value: "1"           # worker -> API status cadence, seconds
+      - key: ROBOTS_CACHE_HOSTS
+        value: "2000"        # robots.txt answers kept in memory
