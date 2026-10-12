@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 
 from . import config
 
@@ -64,6 +65,82 @@ _lock = threading.Lock()
 
 def enabled() -> bool:
     return bool(config.DATABASE_URL)
+
+
+# -- connection status for /api/health: says WHY the database can't be used
+# (never the password), so a deploy with a wrong SUPABASE_DB_URL can be fixed
+# without reading server logs.
+STATUS_CACHE_S = 60.0
+_status = {"t": 0.0, "value": ""}
+_status_lock = threading.Lock()
+
+_REASONS = (
+    ("password authentication failed", "wrong database password in SUPABASE_DB_URL "
+     "(special characters must be URL-encoded: @ -> %40, # -> %23, + -> %2B, & -> %26, / -> %2F)"),
+    ("tenant or user not found", "wrong username or project in SUPABASE_DB_URL - the Session "
+     "pooler user is postgres.<project-ref>, copied from Supabase -> Connect -> Session pooler"),
+    ("could not translate host name", "database host not found - check the host in SUPABASE_DB_URL"),
+    ("failed to resolve host", "database host not found - check the host in SUPABASE_DB_URL"),
+    ("missing \"=\"", "SUPABASE_DB_URL is not a valid postgresql:// connection string"),
+    ("name or service not known", "database host not found - check the host in SUPABASE_DB_URL"),
+    ("network is unreachable", "database host not reachable - db.<ref>.supabase.co is IPv6-only: "
+     "use the Session pooler string (Supabase -> Connect -> Session pooler)"),
+    ("cannot assign requested address", "database host not reachable - db.<ref>.supabase.co is "
+     "IPv6-only: use the Session pooler string (Supabase -> Connect -> Session pooler)"),
+    ("timeout", "connection to the database timed out - check the host and port in SUPABASE_DB_URL"),
+    ("timed out", "connection to the database timed out - check the host and port in SUPABASE_DB_URL"),
+    ("connection refused", "the database refused the connection - check the port (5432) in SUPABASE_DB_URL"),
+    ("invalid dsn", "SUPABASE_DB_URL is not a valid postgresql:// connection string"),
+    ("invalid connection option", "SUPABASE_DB_URL is not a valid postgresql:// connection string"),
+)
+
+
+def _reason(exc: BaseException) -> str:
+    msg = str(exc)
+    low = msg.lower()
+    for needle, text in _REASONS:
+        if needle in low:
+            return text
+    from urllib.parse import urlsplit
+    try:
+        pw = urlsplit(config.DATABASE_URL).password or ""
+    except ValueError:
+        pw = ""
+    first = (msg.strip().splitlines() or [""])[0]
+    if pw:
+        first = first.replace(pw, "***")
+    return f"{type(exc).__name__}: {first[:200]}"
+
+
+def status() -> str:
+    """'off' (no SUPABASE_DB_URL), 'ok', or 'error: <why>'. Cached
+    STATUS_CACHE_S. Blocking - call in a thread."""
+    if not enabled():
+        return "off"
+    now = time.monotonic()
+    with _status_lock:
+        if _status["value"] and now - _status["t"] < STATUS_CACHE_S:
+            return _status["value"]
+    url = config.DATABASE_URL
+    if "[your-password]" in url.lower() or "[password]" in url.lower():
+        value = ("error: SUPABASE_DB_URL still contains the [YOUR-PASSWORD] placeholder - "
+                 "put the real database password there (without the brackets)")
+    else:
+        try:
+            if _pool is not None:
+                with _pool.connection(timeout=10) as conn:
+                    conn.execute("SELECT 1")
+            else:
+                import psycopg
+                psycopg.connect(url, connect_timeout=10, prepare_threshold=None).close()
+            value = "ok"
+        except Exception as exc:
+            value = "error: " + _reason(exc)
+    with _status_lock:
+        _status.update(t=time.monotonic(), value=value)
+    if value != "ok":
+        log.warning("database status: %s", value)
+    return value
 
 
 def pool():

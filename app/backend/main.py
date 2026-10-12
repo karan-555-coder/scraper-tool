@@ -47,7 +47,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from . import auth, config, fastjson, keys, persist
+from . import auth, config, db, fastjson, keys, persist
 from .collector.categories import SUMMARY_FILE
 from .hub import RpcError, WorkerHub, WorkerUnavailable
 
@@ -401,13 +401,17 @@ async def h_health(scope, headers, client) -> Reply:
     """Unauthenticated liveness probe. `worker` reports the collection
     worker: up | starting | down. `client_ip` is the address the per-IP
     limits apply to (check it after deploying behind a proxy: it must be
-    your own public address, not the proxy's)."""
+    your own public address, not the proxy's). `database`: off | ok |
+    error: <why> (never the password) - the first thing to check when
+    login / sign-up answer 'user database unavailable'."""
     fresh = time.time() - hub.last_bundle < 5
     worker = "up" if hub.up.is_set() and fresh else (
         "starting" if hub.proc is not None else "down")
+    database = await asyncio.to_thread(db.status)
     return jreply({"status": "ok", "version": config.APP_VERSION,
                    "auth_required": bool(config.auth_token()),
                    "login_required": auth.enabled(), "worker": worker,
+                   "database": database,
                    "client_ip": scope.get("bdc", ("", ""))[1]})
 
 

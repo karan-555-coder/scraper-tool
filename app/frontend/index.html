@@ -1196,6 +1196,17 @@ $('authForm').onsubmit = async ev => {
     }
     if (!r.ok) {
       const d = data.detail;
+      if (r.status === 503) {
+        // the account database is down / misconfigured: say where to look
+        let why = '';
+        try {
+          const h = await (await fetch(API_BASE + '/api/health', {cache: 'no-store'})).json();
+          if (h.database && h.database !== 'ok') why = ' Reason: ' + h.database.replace(/^error:\s*/, '');
+        } catch (e) {}
+        authError('Accounts are unavailable right now - the app cannot reach its user database.' +
+                  (why || ' Try again in a minute.'));
+        return;
+      }
       authError(typeof d === 'string' ? d
         : 'Could not ' + (signup ? 'sign up' : 'log in') + ' - check the fields.');
       return;

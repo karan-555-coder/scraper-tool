@@ -259,6 +259,24 @@ def main_():
         os.environ["APP_AUTH_TOKEN"] = ""
     print("  access code is checked before the login wall")
 
+    # /api/health says why the user database can't be used - never the password
+    from backend import config as cfg, db
+    real = cfg.DATABASE_URL
+    try:
+        for url, expect in (
+                ("", "off"),
+                ("postgresql://postgres.x:[YOUR-PASSWORD]@h.example:5432/postgres", "placeholder"),
+                ("postgresql://postgres.x:S3cretPw9@no-such-host.invalid:5432/postgres", "host not found")):
+            cfg.DATABASE_URL = url
+            db._status.update(t=0.0, value="")
+            st, health, _ = call("GET", "/api/health")
+            assert st == 200 and expect in health["database"], (url, health)
+            assert "S3cretPw9" not in str(health)
+    finally:
+        cfg.DATABASE_URL = real
+        db._status.update(t=0.0, value="")
+    print("  /api/health reports why the database is unavailable (no password)")
+
     print("ALL KEY TESTS PASSED")
 
 
