@@ -661,6 +661,7 @@ class Guard:
                 user, bad = None, (exc.status, exc.detail, ())
             if user is not None:
                 who = auth.identity(user["id"])
+                auth.last_seen[user["id"]] = time.time()
             elif bad is None:
                 bad = (401, "Please log in", ((b"x-login-required", b"1"),))
         scope["bdc"] = (who, ip)          # for the FastAPI endpoints
@@ -791,19 +792,20 @@ def _auth_off():
 
 
 @api.post("/api/auth/signup")
-async def auth_signup(req: SignupRequest):
+async def auth_signup(req: SignupRequest, request: Request):
     _auth_off()
     try:
-        return jresponse(await auth.signup(req.name, req.email, req.password), 201)
+        return jresponse(await auth.signup(req.name, req.email, req.password,
+                                           ip_of(request)), 201)
     except auth.AuthError as exc:
         raise HTTPException(exc.status, exc.detail) from None
 
 
 @api.post("/api/auth/login")
-async def auth_login(req: LoginRequest):
+async def auth_login(req: LoginRequest, request: Request):
     _auth_off()
     try:
-        return jresponse(await auth.login(req.email, req.password))
+        return jresponse(await auth.login(req.email, req.password, ip_of(request)))
     except auth.AuthError as exc:
         raise HTTPException(exc.status, exc.detail) from None
 
@@ -812,7 +814,7 @@ async def auth_login(req: LoginRequest):
 async def auth_logout(request: Request):
     _auth_off()
     try:
-        await auth.logout(auth.bearer(dict(request.scope["headers"])))
+        await auth.logout(auth.bearer(dict(request.scope["headers"])), ip_of(request))
     except auth.AuthError as exc:
         raise HTTPException(exc.status, exc.detail) from None
     return jresponse({"ok": True})
@@ -858,6 +860,23 @@ async def admin_usage(request: Request):
     balance = (await asyncio.to_thread(keys.balance, server))[0] if server else None
     return jresponse({"users": rows, "totals": totals,
                       "server_key": {"configured": bool(server), "balance": balance}})
+
+
+@api.get("/api/admin/activity")
+async def admin_activity(request: Request, days: int = 30):
+    """Admins only: who is online now, logged-in sessions, logins / logouts
+    today and per user, and the recent login history (signup, login,
+    logout, failed login with time and address)."""
+    _auth_off()
+    try:
+        user = await auth.session_user(auth.bearer(dict(request.scope["headers"])))
+        if user is None:
+            raise HTTPException(401, "Please log in")
+        if not user.get("is_admin"):
+            raise HTTPException(403, "Admins only")
+        return jresponse(await auth.activity(days=max(1, min(days, 90))))
+    except auth.AuthError as exc:
+        raise HTTPException(exc.status, exc.detail) from None
 
 
 @api.get("/api/auth/me")

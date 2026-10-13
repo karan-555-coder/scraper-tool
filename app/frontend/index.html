@@ -378,6 +378,19 @@
   .admin-table .num { text-align: right; font-variant-numeric: tabular-nums; }
   .admin-table td small { display: block; color: var(--ink-3); }
   .admin-table tr.total td { font-weight: 700; border-top: 2px solid var(--border); }
+  .admin-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+  .admin-tab { border: 1px solid var(--border); background: var(--surface); color: var(--ink-2);
+               border-radius: 999px; padding: 7px 14px; font: inherit; font-size: 13px;
+               font-weight: 600; cursor: pointer; }
+  .admin-tab.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .act-tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .online-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+                margin-right: 6px; background: var(--ink-3); vertical-align: middle; }
+  .online-dot.on { background: var(--good); }
+  .ev-login { color: var(--good); font-weight: 600; }
+  .ev-logout { color: var(--ink-2); font-weight: 600; }
+  .ev-signup { color: var(--accent); font-weight: 600; }
+  .ev-login_failed { color: var(--bad); font-weight: 600; }
   .admin-tag { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 6px;
                font-size: 10.5px; background: var(--accent-soft); color: var(--accent); }
 
@@ -493,13 +506,17 @@
   <!-- ============ ADMIN: SERPER USAGE PER USER ============ -->
   <section id="adminPanel" class="panel admin-panel">
     <div class="admin-head">
-      <div class="step"><span class="n">&#128202;</span> Admin &mdash; Serper credits used per user</div>
+      <div class="admin-tabs" role="tablist">
+        <button type="button" class="admin-tab on" id="adTabCredits" role="tab">&#128202; Credits per user</button>
+        <button type="button" class="admin-tab" id="adTabActivity" role="tab">&#128100; Login activity</button>
+      </div>
       <div class="admin-actions">
         <button class="btn btn-dl" id="adminRefresh" type="button">Refresh</button>
         <button class="btn btn-dl" id="adminCsv" type="button">Download CSV</button>
         <button class="btn-link" id="adminClose" type="button">Close</button>
       </div>
     </div>
+    <div id="adCredits">
     <div class="credit-tiles">
       <div class="credit-tile"><span>Shared key credits left</span><b id="adBalance">&ndash;</b></div>
       <div class="credit-tile"><span>Used on shared key</span><b id="adServer">&ndash;</b></div>
@@ -516,6 +533,36 @@
         </tr></thead>
         <tbody id="adminRows"></tbody>
       </table>
+    </div>
+    </div>
+
+    <div id="adActivity" style="display:none">
+      <div class="credit-tiles act-tiles">
+        <div class="credit-tile"><span>Online now</span><b id="acOnline">&ndash;</b></div>
+        <div class="credit-tile"><span>Logged-in users</span><b id="acLoggedIn">&ndash;</b></div>
+        <div class="credit-tile"><span>Logins today</span><b id="acLoginsToday">&ndash;</b></div>
+        <div class="credit-tile"><span>Logouts today</span><b id="acLogoutsToday">&ndash;</b></div>
+        <div class="credit-tile"><span>Sign-ups today</span><b id="acSignupsToday">&ndash;</b></div>
+        <div class="credit-tile"><span>Failed logins today</span><b id="acFailedToday">&ndash;</b></div>
+      </div>
+      <p class="key-status" id="actMsg"></p>
+      <div class="admin-scroll">
+        <table class="admin-table">
+          <thead><tr>
+            <th>User</th><th>Status</th><th class="num">Sessions</th>
+            <th>Last login</th><th>Last logout</th><th>Last active</th>
+            <th class="num">Logins (7 d)</th><th class="num">Logouts (7 d)</th>
+          </tr></thead>
+          <tbody id="actRows"></tbody>
+        </table>
+      </div>
+      <div class="step" style="margin-top:18px">Recent login history</div>
+      <div class="admin-scroll">
+        <table class="admin-table">
+          <thead><tr><th>Time</th><th>Event</th><th>User</th><th>Address</th></tr></thead>
+          <tbody id="actEvents"></tbody>
+        </table>
+      </div>
     </div>
   </section>
 
@@ -1336,16 +1383,104 @@ async function loadAdmin() {
   cell(tr, fmtN(d.totals.records), 'num'); cell(tr, ''); cell(tr, '');
   body.appendChild(tr);
 }
+let adminTab = 'credits', activityData = null, activityTimer = null;
+const EVENT_LABEL = {login: 'Logged in', logout: 'Logged out', signup: 'Signed up',
+                     login_failed: 'Failed login'};
+function showAdminTab(tab) {
+  adminTab = tab;
+  $('adTabCredits').classList.toggle('on', tab === 'credits');
+  $('adTabActivity').classList.toggle('on', tab === 'activity');
+  $('adCredits').style.display = tab === 'credits' ? '' : 'none';
+  $('adActivity').style.display = tab === 'activity' ? '' : 'none';
+  clearInterval(activityTimer);
+  if (tab === 'activity') {
+    loadActivity();
+    activityTimer = setInterval(() => {   // live while the tab is open
+      if ($('adminPanel').classList.contains('show') && !document.hidden) loadActivity();
+    }, 30000);
+  } else {
+    loadAdmin();
+  }
+}
+async function loadActivity() {
+  $('actMsg').textContent = 'Loading\u2026';
+  try {
+    activityData = await api('/api/admin/activity');
+  } catch (e) {
+    $('actMsg').textContent = e.message || 'Could not load the login activity';
+    return;
+  }
+  const d = activityData, sm = d.summary;
+  setText('acOnline', fmtN(sm.online_now));
+  setText('acLoggedIn', `${fmtN(sm.logged_in_users)} / ${fmtN(sm.users)}`);
+  setText('acLoginsToday', fmtN(sm.logins_today));
+  setText('acLogoutsToday', fmtN(sm.logouts_today));
+  setText('acSignupsToday', fmtN(sm.signups_today));
+  setText('acFailedToday', fmtN(sm.failed_today));
+  $('actMsg').textContent = `Online = used the app in the last ${Math.round(d.online_window_s / 60)} min. ` +
+    `Last 7 days: ${fmtN(sm.logins_7d)} logins, ${fmtN(sm.logouts_7d)} logouts. ` +
+    `${fmtN(sm.active_sessions)} active login session${sm.active_sessions === 1 ? '' : 's'}.`;
+  const cell = (tr, text, cls) => { const td = document.createElement('td'); if (cls) td.className = cls; td.textContent = text; tr.appendChild(td); return td; };
+  const body = $('actRows'); body.innerHTML = '';
+  for (const u of d.users) {
+    const tr = document.createElement('tr');
+    const who = cell(tr, u.name || '');
+    if (u.is_admin) { const t = document.createElement('span'); t.className = 'admin-tag'; t.textContent = 'admin'; who.appendChild(t); }
+    const sm2 = document.createElement('small'); sm2.textContent = u.email; who.appendChild(sm2);
+    const st = cell(tr, '');
+    const dot = document.createElement('span'); dot.className = 'online-dot' + (u.online ? ' on' : '');
+    st.appendChild(dot);
+    st.appendChild(document.createTextNode(u.online ? 'Online' : (u.sessions ? 'Logged in' : 'Logged out')));
+    cell(tr, fmtN(u.sessions), 'num');
+    cell(tr, u.last_login ? fmtWhen(u.last_login) : '\u2013');
+    cell(tr, u.last_logout ? fmtWhen(u.last_logout) : '\u2013');
+    cell(tr, u.last_seen ? fmtWhen(u.last_seen) : '\u2013');
+    cell(tr, fmtN(u.logins_7d), 'num');
+    cell(tr, fmtN(u.logouts_7d), 'num');
+    body.appendChild(tr);
+  }
+  const ev = $('actEvents'); ev.innerHTML = '';
+  if (!d.events.length) {
+    const tr = document.createElement('tr'); cell(tr, 'No logins recorded yet.'); cell(tr, ''); cell(tr, ''); cell(tr, '');
+    ev.appendChild(tr);
+  }
+  for (const e of d.events) {
+    const tr = document.createElement('tr');
+    cell(tr, fmtWhen(e.at));
+    cell(tr, EVENT_LABEL[e.kind] || e.kind, 'ev-' + e.kind);
+    cell(tr, e.email || '\u2013');
+    cell(tr, e.ip || '\u2013');
+    ev.appendChild(tr);
+  }
+}
+$('adTabCredits').onclick = () => showAdminTab('credits');
+$('adTabActivity').onclick = () => showAdminTab('activity');
 $('adminBtn').onclick = () => {
   $('adminPanel').classList.add('show');
   $('adminPanel').scrollIntoView({behavior: 'smooth', block: 'start'});
-  loadAdmin();
+  showAdminTab(adminTab);
 };
-$('adminRefresh').onclick = loadAdmin;
-$('adminClose').onclick = () => $('adminPanel').classList.remove('show');
+$('adminRefresh').onclick = () => (adminTab === 'activity' ? loadActivity() : loadAdmin());
+$('adminClose').onclick = () => { $('adminPanel').classList.remove('show'); clearInterval(activityTimer); };
 $('adminCsv').onclick = () => {
-  if (!adminData) return;
   const q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+  if (adminTab === 'activity') {
+    if (!activityData) return;
+    const iso = t => (t ? new Date(t * 1000).toISOString() : '');
+    const lines = [['Time', 'Event', 'Email', 'Address'].map(q).join(',')];
+    for (const e of activityData.events) lines.push([iso(e.at), EVENT_LABEL[e.kind] || e.kind, e.email, e.ip].map(q).join(','));
+    lines.push('');
+    lines.push(['Name', 'Email', 'Status', 'Sessions', 'Last login', 'Last logout', 'Last active',
+                'Logins 7d', 'Logouts 7d'].map(q).join(','));
+    for (const u of activityData.users) {
+      lines.push([u.name, u.email, u.online ? 'Online' : (u.sessions ? 'Logged in' : 'Logged out'), u.sessions,
+                  iso(u.last_login), iso(u.last_logout), iso(u.last_seen), u.logins_7d, u.logouts_7d].map(q).join(','));
+    }
+    saveBlobAs(new Blob(['\ufeff' + lines.join('\r\n')], {type: 'text/csv'}),
+               'login_activity_' + new Date().toISOString().slice(0, 10) + '.csv');
+    return;
+  }
+  if (!adminData) return;
   const head = ['Name', 'Email', 'User ID', 'Credits used', 'Shared key credits', 'Own key credits',
                 'Searches', 'Records', 'Last used', 'Own key', 'Admin'];
   const lines = [head.map(q).join(',')];

@@ -266,6 +266,45 @@ def main_():
         os.environ["ADMIN_EMAILS"] = ""
     print("  admin usage report: admins only; every account with its credits")
 
+    # admin login activity: online now, sessions, logins / logouts, history
+    auth.use_store(auth.MemoryStore())
+    auth.last_seen.clear()
+    os.environ["ADMIN_EMAILS"] = "boss2@example.com"
+    try:
+        tb = signup("boss2@example.com")
+        tw = signup("worker2@example.com")
+        call("POST", "/api/auth/login", {"email": "worker2@example.com",
+                                         "password": "wrong password"}, ip="10.7.0.9")
+        st, d, _ = call("POST", "/api/auth/login", {"email": "worker2@example.com",
+                                                    "password": "long enough pw"}, ip="10.7.0.8")
+        tw2 = d["token"]
+        call("GET", "/api/config", token=tw2)              # worker2 is active now
+        st, _, _ = call("POST", "/api/auth/logout", token=tw, ip="10.7.0.7")
+        assert st == 200
+        st, _, _ = call("GET", "/api/admin/activity", token=tw2)
+        assert st == 403, st
+        st, act, _ = call("GET", "/api/admin/activity", token=tb)
+        assert st == 200, (st, act)
+        sm = act["summary"]
+        assert (sm["signups_today"], sm["logins_today"], sm["logouts_today"],
+                sm["failed_today"]) == (2, 1, 1, 1), sm
+        assert sm["users"] == 2 and sm["logged_in_users"] == 2 and sm["active_sessions"] == 2, sm
+        assert sm["online_now"] == 2, sm                   # both made requests just now
+        w = next(u for u in act["users"] if u["email"] == "worker2@example.com")
+        assert w["sessions"] == 1 and w["last_login"] and w["last_logout"] and w["online"], w
+        call("POST", "/api/auth/logout", token=tw2, ip="10.7.0.6")
+        st, act2, _ = call("GET", "/api/admin/activity", token=tb)
+        w = next(u for u in act2["users"] if u["email"] == "worker2@example.com")
+        assert not w["online"] and w["sessions"] == 0, w   # logged out = offline at once
+        kinds = [e["kind"] for e in act["events"]]
+        assert kinds[0] == "logout" and kinds.count("signup") == 2 and "login_failed" in kinds, kinds
+        failed = next(e for e in act["events"] if e["kind"] == "login_failed")
+        assert failed["email"] == "worker2@example.com" and failed["ip"] == "10.7.0.9", failed
+        assert "password" not in str(act).replace("login_failed", "") and "token" not in str(act)
+    finally:
+        os.environ["ADMIN_EMAILS"] = ""
+    print("  admin login activity: online, sessions, logins/logouts/failed, history")
+
     # local accounts (APP_LOCAL_ACCOUNTS=1) survive a restart
     path = os.path.join(tmp, "accounts.json")
     auth.use_store(auth.FileStore(path))

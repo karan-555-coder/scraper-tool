@@ -45,6 +45,12 @@ NAME_MAX = 60
 SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 14, 8, 1
 SESSION_CACHE_S = 60.0           # a session is re-checked in the DB at most this often
 SESSION_CACHE_MAX = 5000
+EVENTS_KEEP_DAYS = 90            # login / logout history kept in the database
+EVENTS_KEEP_LOCAL = 5000         # ... and in the local accounts file
+ONLINE_S = 120                   # "online now" = a request within this many seconds
+# user id -> time of their last API request (this process; the page polls
+# every few seconds, so an open tab keeps a user "online")
+last_seen: dict[str, float] = {}
 
 
 class AuthError(Exception):
@@ -148,6 +154,29 @@ class PgStore:
             conn.execute(f"DELETE FROM {db.SCHEMA}.sessions WHERE token_hash = %s",
                          (token_hash,))
 
+    def add_event(self, kind: str, user_id: str, email: str, ip: str):
+        with db.connection() as conn:
+            conn.execute(f"INSERT INTO {db.SCHEMA}.auth_events (kind, user_id, email, ip)"
+                         " VALUES (%s, %s, %s, %s)", (kind, user_id, email, ip))
+            if secrets.randbelow(50) == 0:          # keep EVENTS_KEEP_DAYS of history
+                conn.execute(f"DELETE FROM {db.SCHEMA}.auth_events WHERE at < now() - "
+                             f"interval '{EVENTS_KEEP_DAYS} days'")
+
+    def events(self, since: datetime, limit: int) -> list[dict]:
+        with db.connection() as conn:
+            rows = conn.execute(
+                f"SELECT at, kind, user_id, email, ip FROM {db.SCHEMA}.auth_events"
+                " WHERE at >= %s ORDER BY at DESC LIMIT %s", (since, limit)).fetchall()
+        return [{"at": r[0], "kind": r[1], "user_id": r[2], "email": r[3], "ip": r[4]}
+                for r in rows]
+
+    def active_sessions(self) -> dict[str, int]:
+        with db.connection() as conn:
+            rows = conn.execute(
+                f"SELECT user_id, count(*) FROM {db.SCHEMA}.sessions"
+                " WHERE expires_at > now() GROUP BY user_id").fetchall()
+        return {r[0]: int(r[1]) for r in rows}
+
 
 class MemoryStore:
     """Same interface, in memory (tests, or a demo without a database)."""
@@ -156,6 +185,7 @@ class MemoryStore:
         self.lock = threading.Lock()
         self.users: dict[str, dict] = {}       # email -> doc
         self.sessions: dict[str, dict] = {}    # token hash -> doc
+        self.event_log: list[dict] = []        # oldest first, capped
 
     def create_user(self, doc: dict) -> str:
         with self.lock:
@@ -189,6 +219,25 @@ class MemoryStore:
     def delete_session(self, token_hash: str):
         with self.lock:
             self.sessions.pop(token_hash, None)
+
+    def add_event(self, kind: str, user_id: str, email: str, ip: str):
+        with self.lock:
+            self.event_log.append({"at": _now(), "kind": kind, "user_id": user_id,
+                                   "email": email, "ip": ip})
+            del self.event_log[:-EVENTS_KEEP_LOCAL]
+
+    def events(self, since: datetime, limit: int) -> list[dict]:
+        with self.lock:
+            out = [dict(e) for e in reversed(self.event_log) if e["at"] >= since]
+        return out[:limit]
+
+    def active_sessions(self) -> dict[str, int]:
+        now, out = _now(), {}
+        with self.lock:
+            for s in self.sessions.values():
+                if s["expires_at"] > now:
+                    out[s["user_id"]] = out.get(s["user_id"], 0) + 1
+        return out
 
 
 class FileStore(MemoryStore):
@@ -224,15 +273,17 @@ class FileStore(MemoryStore):
                 sessions = {}
                 for th, s in raw_sessions.items():
                     sessions[th] = dict(s, expires_at=datetime.fromisoformat(s["expires_at"]))
+                event_log = [dict(e, at=datetime.fromisoformat(e["at"]))
+                             for e in (data.get("events") or []) if isinstance(e, dict)]
             except FileNotFoundError:
-                users, sessions = {}, {}
+                users, sessions, event_log = {}, {}, []
             except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 log.exception("could not read %s - accounts unavailable until it "
                               "can be read (the file is left untouched; a backup "
                               "of the last good version is %s.bak)", self.path, self.path)
                 raise
             with self.lock:
-                self.users, self.sessions = users, sessions
+                self.users, self.sessions, self.event_log = users, sessions, event_log
             self.loaded = True
 
     def _save(self):
@@ -242,7 +293,8 @@ class FileStore(MemoryStore):
                          if s["expires_at"] > now}
         data = {"users": self.users,
                 "sessions": {th: dict(s, expires_at=s["expires_at"].isoformat())
-                             for th, s in self.sessions.items()}}
+                             for th, s in self.sessions.items()},
+                "events": [dict(e, at=e["at"].isoformat()) for e in self.event_log]}
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -287,6 +339,20 @@ class FileStore(MemoryStore):
         super().delete_session(token_hash)
         with self.lock:
             self._save()
+
+    def add_event(self, kind: str, user_id: str, email: str, ip: str):
+        self._ensure()
+        super().add_event(kind, user_id, email, ip)
+        with self.lock:
+            self._save()
+
+    def events(self, since: datetime, limit: int) -> list[dict]:
+        self._ensure()
+        return super().events(since, limit)
+
+    def active_sessions(self) -> dict[str, int]:
+        self._ensure()
+        return super().active_sessions()
 
 
 _store = None
@@ -367,7 +433,7 @@ async def _new_session(user: dict) -> dict:
             "expires_at": expires.isoformat(timespec="seconds")}
 
 
-async def signup(name: str, email: str, password: str) -> dict:
+async def signup(name: str, email: str, password: str, ip: str = "") -> dict:
     name = " ".join((name or "").split())[:NAME_MAX]
     if not name:
         raise AuthError(400, "Enter your name.")
@@ -382,10 +448,23 @@ async def signup(name: str, email: str, password: str) -> dict:
         raise AuthError(409, "An account with this email already exists - "
                              "log in instead.") from None
     log.info("signup: user %s", uid)
-    return await _new_session({"id": uid, "name": name, "email": email})
+    user = {"id": uid, "name": name, "email": email}
+    out = await _new_session(user)
+    await record("signup", user, ip)
+    return out
 
 
-async def login(email: str, password: str) -> dict:
+async def record(kind: str, user: dict | None, ip: str = "", email: str = ""):
+    """Login history for the admin report (signup / login / logout /
+    login_failed). Never fails the request it belongs to."""
+    try:
+        await _call(_get_store().add_event, kind, (user or {}).get("id", ""),
+                    (user or {}).get("email", "") or email, ip)
+    except Exception:
+        log.warning("could not record %s event", kind)
+
+
+async def login(email: str, password: str, ip: str = "") -> dict:
     bad = AuthError(401, "Wrong email or password.")
     try:
         email = _clean_email(email)
@@ -395,8 +474,67 @@ async def login(email: str, password: str) -> dict:
     ok = await asyncio.to_thread(verify_password, password or "",
                                  user["password_hash"] if user else _DUMMY_HASH)
     if not (user and ok):
+        await record("login_failed", None, ip, email[:254])
         raise bad
-    return await _new_session(user)
+    out = await _new_session(user)
+    await record("login", user, ip)
+    return out
+
+
+async def activity(days: int = 30, limit: int = 300) -> dict:
+    """Admin report: users, their sessions, online state, login history."""
+    store = _get_store()
+    users = await _call(store.list_users)
+    sessions = await _call(store.active_sessions)
+    since = _now() - timedelta(days=days)
+    events = await _call(store.events, since, 5000)
+    now = time.time()
+    day0 = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    week0 = _now() - timedelta(days=7)
+    per: dict[str, dict] = {}
+    for e in events:                                  # newest first
+        p = per.setdefault(e["user_id"], {"last_login": None, "last_logout": None,
+                                          "logins_7d": 0, "logouts_7d": 0})
+        if e["kind"] == "login" and p["last_login"] is None:
+            p["last_login"] = e["at"]
+        if e["kind"] == "logout" and p["last_logout"] is None:
+            p["last_logout"] = e["at"]
+        if e["at"] >= week0:
+            if e["kind"] == "login":
+                p["logins_7d"] += 1
+            elif e["kind"] == "logout":
+                p["logouts_7d"] += 1
+    ts = lambda d: d.timestamp() if d else None      # noqa: E731
+    rows = []
+    for u in users:
+        p = per.get(u["id"], {})
+        seen = last_seen.get(u["id"])
+        rows.append({"id": u["id"], "name": u["name"], "email": u["email"],
+                     "is_admin": is_admin(u["email"]),
+                     "online": bool(seen and now - seen < ONLINE_S),
+                     "last_seen": seen, "sessions": sessions.get(u["id"], 0),
+                     "last_login": ts(p.get("last_login")),
+                     "last_logout": ts(p.get("last_logout")),
+                     "logins_7d": p.get("logins_7d", 0), "logouts_7d": p.get("logouts_7d", 0)})
+    rows.sort(key=lambda r: (not r["online"], -(r["last_seen"] or r["last_login"] or 0)))
+    today = [e for e in events if e["at"] >= day0]
+    count = lambda evs, k: sum(1 for e in evs if e["kind"] == k)   # noqa: E731
+    return {
+        "summary": {
+            "users": len(users), "online_now": sum(r["online"] for r in rows),
+            "logged_in_users": sum(1 for r in rows if r["sessions"]),
+            "active_sessions": sum(sessions.values()),
+            "logins_today": count(today, "login"), "logouts_today": count(today, "logout"),
+            "signups_today": count(today, "signup"),
+            "failed_today": count(today, "login_failed"),
+            "logins_7d": sum(r["logins_7d"] for r in rows),
+            "logouts_7d": sum(r["logouts_7d"] for r in rows),
+        },
+        "users": rows,
+        "events": [{"at": ts(e["at"]), "kind": e["kind"], "email": e["email"],
+                    "ip": e["ip"]} for e in events[:limit]],
+        "online_window_s": ONLINE_S, "days": days,
+    }
 
 
 async def session_user(token: str) -> dict | None:
@@ -418,10 +556,14 @@ async def session_user(token: str) -> dict | None:
     return user
 
 
-async def logout(token: str):
+async def logout(token: str, ip: str = ""):
+    user = await session_user(token)
     th = _token_hash(token)
     _cache.pop(th, None)
     await _call(_get_store().delete_session, th)
+    if user is not None:
+        last_seen.pop(user["id"], None)      # logged out = not online any more
+        await record("logout", user, ip)
 
 
 def bearer(headers: dict) -> str:

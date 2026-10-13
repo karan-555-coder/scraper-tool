@@ -48,6 +48,15 @@ CREATE TABLE IF NOT EXISTS {SCHEMA}.user_files (
     updated_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (owner, name)
 );
+CREATE TABLE IF NOT EXISTS {SCHEMA}.auth_events (
+    id      bigserial PRIMARY KEY,
+    at      timestamptz NOT NULL DEFAULT now(),
+    kind    text NOT NULL,
+    user_id text NOT NULL DEFAULT '',
+    email   text NOT NULL DEFAULT '',
+    ip      text NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS auth_events_at ON {SCHEMA}.auth_events (at);
 CREATE TABLE IF NOT EXISTS {SCHEMA}.user_keys (
     owner      text PRIMARY KEY,
     api_key    text NOT NULL,
@@ -57,6 +66,7 @@ ALTER TABLE {SCHEMA}.users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE {SCHEMA}.sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE {SCHEMA}.user_files ENABLE ROW LEVEL SECURITY;
 ALTER TABLE {SCHEMA}.user_keys ENABLE ROW LEVEL SECURITY;
+ALTER TABLE {SCHEMA}.auth_events ENABLE ROW LEVEL SECURITY;
 """
 
 _pool = None
