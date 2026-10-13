@@ -39,6 +39,18 @@ The key is read only from the environment or `app/.env`. It is never
 hardcoded, never logged, never sent to the frontend, and `.env` is
 gitignored. Setting the `SERPER_API_KEY` environment variable also works.
 
+### Admin: Serper credits per user
+
+Set `ADMIN_EMAILS` (comma-separated account emails, e.g.
+`ADMIN_EMAILS=admin@headfield.com`). Those accounts log in normally and get an
+**Admin** button in the header: a table of every account - name, email, user
+ID, credits used (on the shared server key and on their own key), searches,
+records, last use, whether a search is running and whether they saved a key of
+their own (masked) - plus the shared key's remaining balance and a CSV
+download. Only admins can open it (`GET /api/admin/usage`, 403 otherwise).
+Credits come from each account's own search ledger, so usage from before this
+report existed is included (counted as shared-key credits).
+
 ### Each user's own Serper key
 
 By default every user searches on the server key above (shown as "Demo API

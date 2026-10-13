@@ -1383,7 +1383,7 @@ class CollectionJob:
         self.state.ledger.record(
             lk, kind=req.kind, query=req.query, page=req.page, category=self.category,
             credits=credits, results=len(results), new=0, source=source,
-            timeouts=timeouts)
+            timeouts=timeouts, key_source="own" if self.serper_key else "server")
         new = 0
         try:
             if req.kind == "places":

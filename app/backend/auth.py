@@ -119,6 +119,14 @@ class PgStore:
         return (dict(zip(("id", "name", "email", "password_hash"), row))
                 if row else None)
 
+    def list_users(self) -> list[dict]:
+        with db.connection() as conn:
+            rows = conn.execute(
+                f"SELECT id, name, email, created_at FROM {db.SCHEMA}.users"
+                " ORDER BY created_at").fetchall()
+        return [{"id": r[0], "name": r[1], "email": r[2], "created_at": str(r[3])}
+                for r in rows]
+
     def create_session(self, token_hash: str, user: dict, expires: datetime):
         with db.connection() as conn:
             conn.execute(f"DELETE FROM {db.SCHEMA}.sessions WHERE expires_at < now()")
@@ -161,6 +169,12 @@ class MemoryStore:
         with self.lock:
             doc = self.users.get(email)
             return dict(doc) if doc else None
+
+    def list_users(self) -> list[dict]:
+        with self.lock:
+            return [{"id": d["id"], "name": d["name"], "email": d["email"],
+                     "created_at": str(d.get("created_at", ""))}
+                    for d in self.users.values()]
 
     def create_session(self, token_hash: str, user: dict, expires: datetime):
         with self.lock:
@@ -254,6 +268,10 @@ class FileStore(MemoryStore):
         self._ensure()
         return super().user_by_email(email)
 
+    def list_users(self) -> list[dict]:
+        self._ensure()
+        return super().list_users()
+
     def create_session(self, token_hash: str, user: dict, expires: datetime):
         self._ensure()
         super().create_session(token_hash, user, expires)
@@ -314,8 +332,18 @@ def identity(user_id: str) -> str:
     return f"u{user_id}"
 
 
+def is_admin(email: str) -> bool:
+    """Admins (ADMIN_EMAILS, comma-separated) see the usage report."""
+    return bool(email) and email.strip().lower() in config.admin_emails()
+
+
 def _public(user: dict) -> dict:
-    return {"id": user["id"], "name": user["name"], "email": user["email"]}
+    return {"id": user["id"], "name": user["name"], "email": user["email"],
+            "is_admin": is_admin(user["email"])}
+
+
+async def list_users() -> list[dict]:
+    return await _call(_get_store().list_users)
 
 
 # --------------------------------------------------------------- operations
@@ -381,8 +409,8 @@ async def session_user(token: str) -> dict | None:
     if hit is not None and hit[0] > time.monotonic():
         return hit[1]
     s = await _call(_get_store().session, th)
-    user = ({"id": s["user_id"], "name": s["name"], "email": s["email"]}
-            if s else None)
+    user = ({"id": s["user_id"], "name": s["name"], "email": s["email"],
+             "is_admin": is_admin(s["email"])} if s else None)
     _cache[th] = (time.monotonic() + SESSION_CACHE_S, user)
     _cache.move_to_end(th)
     while len(_cache) > SESSION_CACHE_MAX:

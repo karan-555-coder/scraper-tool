@@ -208,6 +208,64 @@ def main_():
     assert prov.follow_env is True and job.serper_key == ""
     print("  app credits used up -> user's own key -> paused search resumes at once")
 
+    # ledger: credits split by key (shared server key vs the user's own)
+    from backend.collector.credits import CreditLedger
+    led = CreditLedger()
+    led.record("k1", kind="places", query="q in x", page=1, category="Finance",
+               credits=3, results=5, new=0)
+    led.record("k2", kind="organic", query="q2 in x", page=1, category="Finance",
+               credits=2, results=5, new=0, key_source="own")
+    led.record("k3", kind="organic", query="q3 in x", page=1, category="Finance",
+               credits=0, results=5, new=0, source="cache")
+    s1 = led.summary(top=0)
+    assert (s1["total_credits"], s1["server_key_credits"], s1["own_key_credits"]) == (5, 3, 2), s1
+    assert s1["last_used"] > 0
+    s2 = CreditLedger(led.to_dict()).summary(top=0)          # survives a save
+    assert (s2["server_key_credits"], s2["own_key_credits"]) == (3, 2)
+    old = led.to_dict(); old.pop("by_key"); old.pop("last_used")
+    s3 = CreditLedger(old).summary(top=0)                     # older saves: all shared key
+    assert (s3["server_key_credits"], s3["own_key_credits"]) == (5, 0) and s3["last_used"] > 0
+    print("  ledger splits credits: shared key vs own key (old saves = shared key)")
+
+    # admin usage report: admins only, every account listed with its usage
+    auth.use_store(auth.MemoryStore())
+    tadm, tusr = signup("boss@example.com"), signup("worker@example.com")
+    os.environ["ADMIN_EMAILS"] = "Boss@Example.com, other@example.com"
+    try:
+        st, me, _ = call("GET", "/api/auth/me", token=tadm)
+        assert me["user"]["is_admin"] is True, me
+        st, me, _ = call("GET", "/api/auth/me", token=tusr)
+        assert me["user"]["is_admin"] is False, me
+        st, _, _ = call("GET", "/api/admin/usage", token=tusr)
+        assert st == 403, st
+        st, _, _ = call("GET", "/api/admin/usage")
+        assert st == 401, st
+        wid = auth.identity(_uid(tusr))
+
+        async def fake_usage(cmd, timeout=30.0, **args):
+            assert cmd == "usage" and wid in args["owners"] and len(args["owners"]) == 2
+            return {o: ({"credits": 12, "server_key_credits": 10, "own_key_credits": 2,
+                         "searches": 7, "records": 40, "last_used": 1.0, "running": False}
+                        if o == wid else {"credits": 0, "server_key_credits": 0,
+                                          "own_key_credits": 0, "searches": 0, "records": 0,
+                                          "last_used": 0, "running": False})
+                    for o in args["owners"]}
+        real_call, main.hub.call = main.hub.call, fake_usage
+        try:
+            st, rep, _ = call("GET", "/api/admin/usage", token=tadm)
+        finally:
+            main.hub.call = real_call
+        assert st == 200, (st, rep)
+        assert [u["email"] for u in rep["users"]] == ["worker@example.com", "boss@example.com"], rep
+        top = rep["users"][0]
+        assert top["credits"] == 12 and top["own_key_credits"] == 2 and top["id"] == _uid(tusr)
+        assert rep["users"][1]["is_admin"] is True
+        assert rep["totals"]["credits"] == 12 and rep["totals"]["records"] == 40
+        assert "password" not in str(rep) and "scrypt" not in str(rep)
+    finally:
+        os.environ["ADMIN_EMAILS"] = ""
+    print("  admin usage report: admins only; every account with its credits")
+
     # local accounts (APP_LOCAL_ACCOUNTS=1) survive a restart
     path = os.path.join(tmp, "accounts.json")
     auth.use_store(auth.FileStore(path))

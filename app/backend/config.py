@@ -387,6 +387,13 @@ def auth_token() -> str:
     return os.environ.get("APP_AUTH_TOKEN", "").strip()
 
 
+def admin_emails() -> set[str]:
+    """Accounts that may open the admin usage report (ADMIN_EMAILS,
+    comma-separated, case-insensitive). Read on every call: no restart."""
+    return {e.strip().lower() for e in os.environ.get("ADMIN_EMAILS", "").split(",")
+            if e.strip()}
+
+
 def allowed_origins() -> list[str]:
     """CORS origins. Local defaults; override with APP_ALLOWED_ORIGINS
     (comma-separated) behind a production domain. Never '*'."""

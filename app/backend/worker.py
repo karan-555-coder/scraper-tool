@@ -255,6 +255,32 @@ class Worker:
             raise JobRejected(404, "no collection of yours to stop")
         return self.job_view(job)
 
+    def cmd_usage(self, owners: list[str]):
+        """Admin report: Serper credits each account spent (lifetime, from
+        its own ledger - shared key vs own key), searches, records, last use
+        and whether a collection is running now."""
+        out = {}
+        for owner in owners:
+            try:
+                state = self.stores.get(owner)
+                s = state.ledger.summary(top=0)
+                with state.lock:
+                    records = sum(len(r) for r in state.records.values())
+                job = self.manager.client_job(owner)
+                out[owner] = {
+                    "credits": s["total_credits"],
+                    "server_key_credits": s["server_key_credits"],
+                    "own_key_credits": s["own_key_credits"],
+                    "searches": s["total_queries"],
+                    "records": records,
+                    "last_used": s["last_used"],
+                    "running": bool(job is not None and job.status in ACTIVE_STATUSES),
+                }
+            except Exception as exc:          # one unreadable user never hides the rest
+                log.warning("usage report: %s: %s", owner[:12], exc)
+                out[owner] = {"error": type(exc).__name__}
+        return out
+
     def cmd_set_key(self, client: str, serper_key: str = ""):
         """The caller saved / removed their own Serper key: their queued or
         running collection switches to it (a credit-paused one resumes)."""

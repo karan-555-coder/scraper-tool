@@ -818,6 +818,48 @@ async def auth_logout(request: Request):
     return jresponse({"ok": True})
 
 
+@api.get("/api/admin/usage")
+async def admin_usage(request: Request):
+    """Admins only (ADMIN_EMAILS): every account with the Serper credits it
+    spent - on the shared server key and on its own key - searches, records,
+    last use, and whether it saved a key of its own (masked). Plus the
+    shared key's remaining balance."""
+    _auth_off()
+    try:
+        user = await auth.session_user(auth.bearer(dict(request.scope["headers"])))
+        if user is None:
+            raise HTTPException(401, "Please log in")
+        if not user.get("is_admin"):
+            raise HTTPException(403, "Admins only")
+        users = await auth.list_users()
+    except auth.AuthError as exc:
+        raise HTTPException(exc.status, exc.detail) from None
+    owners = [auth.identity(u["id"]) for u in users]
+    try:
+        usage = await hub.call("usage", timeout=120, owners=owners)
+    except (RpcError, WorkerUnavailable) as exc:
+        raise worker_error(exc) from None
+    rows, totals = [], {"credits": 0, "server_key_credits": 0, "own_key_credits": 0,
+                        "searches": 0, "records": 0}
+    for u, owner in zip(users, owners):
+        try:
+            own = await asyncio.to_thread(keys.user_key, owner)
+        except keys.KeyError_:
+            own = ""
+        use = usage.get(owner) or {}
+        row = {"id": u["id"], "name": u["name"], "email": u["email"],
+               "created_at": u.get("created_at", ""), "is_admin": auth.is_admin(u["email"]),
+               "own_key": keys.mask(own), **use}
+        rows.append(row)
+        for k in totals:
+            totals[k] += int(use.get(k) or 0)
+    rows.sort(key=lambda r: -(r.get("credits") or 0))
+    server = config.serper_api_key()
+    balance = (await asyncio.to_thread(keys.balance, server))[0] if server else None
+    return jresponse({"users": rows, "totals": totals,
+                      "server_key": {"configured": bool(server), "balance": balance}})
+
+
 @api.get("/api/auth/me")
 async def auth_me(request: Request):
     _auth_off()

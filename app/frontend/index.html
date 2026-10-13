@@ -363,6 +363,24 @@
   .btn-link { border: 0; background: none; padding: 0; color: var(--accent); cursor: pointer;
               font: inherit; font-weight: 600; }
 
+  /* ---------- admin usage report ---------- */
+  .admin-panel { display: none; }
+  .admin-panel.show { display: block; }
+  .admin-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+                justify-content: space-between; }
+  .admin-head .step { margin: 0; }
+  .admin-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .admin-scroll { overflow-x: auto; margin-top: 6px; }
+  .admin-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .admin-table th, .admin-table td { text-align: left; padding: 8px 10px;
+                                     border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .admin-table th { font-size: 11.5px; color: var(--ink-3); font-weight: 600; }
+  .admin-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .admin-table td small { display: block; color: var(--ink-3); }
+  .admin-table tr.total td { font-weight: 700; border-top: 2px solid var(--border); }
+  .admin-tag { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 6px;
+               font-size: 10.5px; background: var(--accent-soft); color: var(--accent); }
+
   /* ---------- your Serper API key ---------- */
   .key-panel { display: none; }
   .key-panel.show { display: block; }
@@ -460,6 +478,7 @@
       <span class="conn"><span id="keyDot" class="dot"></span>
         <button class="btn-link" id="keyText" type="button" title="Your Serper API key">API key</button></span>
       <span class="conn user-chip" id="userChip"><span id="userName"></span>
+        <button class="btn-link" id="adminBtn" type="button" style="display:none">Admin</button>
         <button class="btn-link" id="logoutBtn" type="button">Log out</button></span>
       <span class="conn" id="slotsChip" style="display:none"><span id="slotsDot" class="dot on"></span><span id="slotsText"></span></span>
     </div>
@@ -470,6 +489,35 @@
     <span id="apiErrMsg">Cannot reach the app &mdash; it is not running. Double-click
     <code>start_app.bat</code> in the app folder. This page reconnects automatically.</span>
   </div>
+
+  <!-- ============ ADMIN: SERPER USAGE PER USER ============ -->
+  <section id="adminPanel" class="panel admin-panel">
+    <div class="admin-head">
+      <div class="step"><span class="n">&#128202;</span> Admin &mdash; Serper credits used per user</div>
+      <div class="admin-actions">
+        <button class="btn btn-dl" id="adminRefresh" type="button">Refresh</button>
+        <button class="btn btn-dl" id="adminCsv" type="button">Download CSV</button>
+        <button class="btn-link" id="adminClose" type="button">Close</button>
+      </div>
+    </div>
+    <div class="credit-tiles">
+      <div class="credit-tile"><span>Shared key credits left</span><b id="adBalance">&ndash;</b></div>
+      <div class="credit-tile"><span>Used on shared key</span><b id="adServer">&ndash;</b></div>
+      <div class="credit-tile"><span>Used on own keys</span><b id="adOwn">&ndash;</b></div>
+    </div>
+    <p class="key-status" id="adminMsg"></p>
+    <div class="admin-scroll">
+      <table class="admin-table">
+        <thead><tr>
+          <th>User</th><th>User ID</th><th class="num">Credits used</th>
+          <th class="num">Shared key</th><th class="num">Own key</th>
+          <th class="num">Searches</th><th class="num">Records</th>
+          <th>Last used</th><th>Own key</th>
+        </tr></thead>
+        <tbody id="adminRows"></tbody>
+      </table>
+    </div>
+  </section>
 
   <!-- ============ YOUR SERPER API KEY + CREDITS ============ -->
   <section id="keyPanel" class="panel key-panel">
@@ -1230,7 +1278,85 @@ function showUser() {
   if (!s || !s.user) return;
   $('userName').textContent = s.user.name || s.user.email;
   $('userChip').classList.add('show');
+  $('adminBtn').style.display = s.user.is_admin ? '' : 'none';
 }
+/* The admin flag can change (ADMIN_EMAILS) without a new login: ask. */
+async function refreshUser() {
+  try {
+    const me = await api('/api/auth/me');
+    const s = getSession();
+    if (me && me.user && s) { setSession({token: s.token, user: me.user}); showUser(); }
+  } catch (e) {}
+}
+
+/* ---------- admin: Serper credits per user ---------- */
+let adminData = null;
+const fmtN = n => (n == null ? '\u2013' : Number(n).toLocaleString());
+function fmtWhen(ts) {
+  if (!ts) return 'never';
+  const d = new Date(ts * 1000);
+  return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+}
+async function loadAdmin() {
+  $('adminMsg').textContent = 'Loading\u2026';
+  try {
+    adminData = await api('/api/admin/usage');
+  } catch (e) {
+    $('adminMsg').textContent = e.message || 'Could not load the report';
+    return;
+  }
+  const d = adminData, body = $('adminRows');
+  setText('adBalance', d.server_key.balance == null ? (d.server_key.configured ? '?' : 'no key') : fmtN(d.server_key.balance));
+  setText('adServer', fmtN(d.totals.server_key_credits));
+  setText('adOwn', fmtN(d.totals.own_key_credits));
+  $('adminMsg').textContent = `${d.users.length} account${d.users.length === 1 ? '' : 's'} \u2014 ` +
+    'credits counted from each account\'s own search ledger (lifetime).';
+  body.innerHTML = '';
+  const cell = (tr, text, cls) => { const td = document.createElement('td'); if (cls) td.className = cls; td.textContent = text; tr.appendChild(td); return td; };
+  for (const u of d.users) {
+    const tr = document.createElement('tr');
+    const who = cell(tr, u.name || '');
+    if (u.is_admin) { const t = document.createElement('span'); t.className = 'admin-tag'; t.textContent = 'admin'; who.appendChild(t); }
+    if (u.running) { const t = document.createElement('span'); t.className = 'admin-tag'; t.textContent = 'searching now'; who.appendChild(t); }
+    const sm = document.createElement('small'); sm.textContent = u.email; who.appendChild(sm);
+    cell(tr, u.id);
+    cell(tr, u.error ? 'error' : fmtN(u.credits), 'num');
+    cell(tr, fmtN(u.server_key_credits), 'num');
+    cell(tr, fmtN(u.own_key_credits), 'num');
+    cell(tr, fmtN(u.searches), 'num');
+    cell(tr, fmtN(u.records), 'num');
+    cell(tr, fmtWhen(u.last_used));
+    cell(tr, u.own_key || '\u2013');
+    body.appendChild(tr);
+  }
+  const tr = document.createElement('tr'); tr.className = 'total';
+  cell(tr, 'Total'); cell(tr, '');
+  cell(tr, fmtN(d.totals.credits), 'num'); cell(tr, fmtN(d.totals.server_key_credits), 'num');
+  cell(tr, fmtN(d.totals.own_key_credits), 'num'); cell(tr, fmtN(d.totals.searches), 'num');
+  cell(tr, fmtN(d.totals.records), 'num'); cell(tr, ''); cell(tr, '');
+  body.appendChild(tr);
+}
+$('adminBtn').onclick = () => {
+  $('adminPanel').classList.add('show');
+  $('adminPanel').scrollIntoView({behavior: 'smooth', block: 'start'});
+  loadAdmin();
+};
+$('adminRefresh').onclick = loadAdmin;
+$('adminClose').onclick = () => $('adminPanel').classList.remove('show');
+$('adminCsv').onclick = () => {
+  if (!adminData) return;
+  const q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+  const head = ['Name', 'Email', 'User ID', 'Credits used', 'Shared key credits', 'Own key credits',
+                'Searches', 'Records', 'Last used', 'Own key', 'Admin'];
+  const lines = [head.map(q).join(',')];
+  for (const u of adminData.users) {
+    lines.push([u.name, u.email, u.id, u.credits, u.server_key_credits, u.own_key_credits,
+                u.searches, u.records, u.last_used ? new Date(u.last_used * 1000).toISOString() : '',
+                u.own_key, u.is_admin ? 'yes' : ''].map(q).join(','));
+  }
+  saveBlobAs(new Blob(['\ufeff' + lines.join('\r\n')], {type: 'text/csv'}),
+             'serper_usage_' + new Date().toISOString().slice(0, 10) + '.csv');
+};
 
 async function init() {
   try {
@@ -1245,6 +1371,7 @@ async function init() {
   }
   setConnected(true);
   showUser();
+  refreshUser();
   creditsPerQuery = cfg.defaults.credits_per_query;
   lastPerCat = Object.fromEntries(cfg.categories.map(c => [c.slug, c]));
   catKeySet = Object.keys(lastPerCat).join('|');

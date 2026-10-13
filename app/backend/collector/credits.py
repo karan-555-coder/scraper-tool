@@ -64,6 +64,17 @@ class CreditLedger:
         self.saved = {"cache_hits": 0, "executed_skips": 0}
         self.saved.update({k: int(v) for k, v in (data.get("saved") or {}).items()
                            if k in self.saved})
+        # paid credits per key: the app's shared server key or the user's own
+        # (admin usage report). Ledgers saved before this split existed count
+        # as server-key credits - the only key there was.
+        by_key = data.get("by_key")
+        if isinstance(by_key, dict):
+            self.by_key = {k: int(by_key.get(k, 0)) for k in ("server", "own")}
+        else:
+            self.by_key = {"server": sum(t["credits"] for t in self.totals.values()), "own": 0}
+        self.last_used = float(data.get("last_used") or max(
+            (e.get("ts", 0) for e in self.entries.values() if e.get("credits", 0) > 0),
+            default=0.0))
         self.lock = threading.Lock()
 
     # -- registry -------------------------------------------------------------
@@ -80,8 +91,9 @@ class CreditLedger:
 
     def record(self, key: str, *, kind: str, query: str, page: int, category: str,
                credits: int, results: int, new: int, source: str = "api",
-               timeouts: int = 0):
-        """One search outcome. source: "api" (paid), "cache" (free re-use)."""
+               timeouts: int = 0, key_source: str = "server"):
+        """One search outcome. source: "api" (paid), "cache" (free re-use).
+        key_source: "server" (the app's key) or "own" (the user's key)."""
         with self.lock:
             e = self.entries.get(key)
             if e is None:
@@ -110,6 +122,10 @@ class CreditLedger:
                 t["new"] += new
                 t["duplicates"] += max(0, results - new)
                 t["timeouts"] += timeouts
+                if credits > 0:
+                    ks = key_source if key_source in self.by_key else "server"
+                    self.by_key[ks] += credits
+                    self.last_used = time.time()
 
     def add_new(self, key: str, new: int):
         """New-business count of a search recorded moments earlier. (The
@@ -158,6 +174,7 @@ class CreditLedger:
             totals = {k: dict(v) for k, v in self.totals.items()}
             entries = [dict(e) for e in self.entries.values()]
             saved = dict(self.saved)
+            by_key, last_used = dict(self.by_key), self.last_used
         credits = sum(t["credits"] for t in totals.values())
         valid = sum(t["valid"] for t in totals.values())
         results = sum(t["results"] for t in totals.values())
@@ -166,6 +183,9 @@ class CreditLedger:
         ranked = sorted(paid, key=lambda e: (-(e["valid"] / e["credits"]), -e["new"]))
         return {
             "total_credits": credits,
+            "server_key_credits": by_key["server"],
+            "own_key_credits": by_key["own"],
+            "last_used": last_used,
             "total_queries": sum(t["requests"] for t in totals.values()),
             "places_credits": totals["places"]["credits"],
             "organic_credits": totals["organic"]["credits"],
@@ -213,4 +233,5 @@ class CreditLedger:
         with self.lock:
             return {"entries": {k: dict(v) for k, v in self.entries.items()},
                     "totals": {k: dict(v) for k, v in self.totals.items()},
-                    "saved": dict(self.saved)}
+                    "saved": dict(self.saved),
+                    "by_key": dict(self.by_key), "last_used": self.last_used}
